@@ -1,0 +1,288 @@
+from flask import Flask, request
+from flask_restful import Api, Resource, reqparse, abort, fields, marshal_with
+import requests
+from flask_cors import CORS
+from pycoingecko import CoinGeckoAPI
+import time
+import os
+
+
+# COINGECKO_APIKEY = 'COINGECKO_APIKEY'
+NFTPORT_APIKEY = '4c7aa7a1-a859-4dae-be49-726b3a567100'
+ALCHEMY_APIKEY = 'Dl0q4u7NZUj3Wu-PbDsI91Vf7mFUlCJR'
+cg = CoinGeckoAPI()
+
+app = Flask(__name__)
+api = Api(app)
+CORS(app)
+
+LoanInfo_post_args = reqparse.RequestParser()
+LoanInfo_post_args.add_argument("walletAddress", type=str,help="Wallet Address is required", required=True)
+
+LoanInfo_put_args = reqparse.RequestParser()
+LoanInfo_put_args.add_argument("walletAddress", type=str,help="Wallet Address is required", required=True)
+LoanInfo_put_args.add_argument("loanID", type=str,help="Loan ID is required", required=True)
+LoanInfo_put_args.add_argument("balance", type=str,help="Balance is required", required=True)
+LoanInfo_put_args.add_argument("loanExpiry", type=int,help="Loan Expiry is required", required=True)
+
+LoanInfo_patch_args = reqparse.RequestParser()
+LoanInfo_patch_args.add_argument("loanID", type=str,help="Loan ID is required", required=True)
+LoanInfo_patch_args.add_argument("balance", type=str,help="Balance is required", required=True)
+
+collateral_post_args = reqparse.RequestParser()
+collateral_post_args.add_argument("transactionAmount", type=float, help="transactionAmount in SGD is required", required=True)
+collateral_post_args.add_argument("symbol", type=str, help="Symbol of NFT collateral is required", required=True)
+
+
+exchange_post_args = reqparse.RequestParser()
+exchange_post_args.add_argument("sgd", type=float, help="amount of sgd is required", required=True)
+
+QrInformation_get_args = reqparse.RequestParser()
+QrInformation_get_args.add_argument("bankAccountNumber", type=str,help="Merchant Bank Account Number is required", required=True)
+QrInformation_get_args.add_argument("transactionAmount", type=str,help="Transaction Amount is required", required=True)
+
+Loan_get_args = reqparse.RequestParser()
+Loan_get_args.add_argument("transactionAmount", type=float,help="Transaction Amount is required", required=True)
+Loan_get_args.add_argument("merchantAccount", type=str,help="merchantAccount is required", required=True)
+
+Loan_put_args = reqparse.RequestParser()
+Loan_put_args.add_argument("transactionAmount", type=float,help="Transaction Amount is required", required=True)
+Loan_put_args.add_argument("merchantAccount", type=str,help="Merchant Account is required", required=True)
+
+PANDA_BANK_ACCOUNT_NUMBER= "888-8888-88"
+
+accounts = {"652-3342-22": {"Account Holder": "IKEA", "Balance": 20002.87, "TransactionHistory":[]},
+            "923-1234-66":{"Account Holder": "Singapore General Hospital", "Balance": 6008.73, "TransactionHistory":[]},
+            "123-4567-89":{"Account Holder": "Courts", "Balance": 78920.43, "TransactionHistory":[]},
+            PANDA_BANK_ACCOUNT_NUMBER: {"Account Holder": "Panda Bank", "Balance": 9999999, "TransactionHistory":[]}
+            }
+
+approvedCollections = {"doodle": "0x8a90CAb2b38dba80c64b7734e58Ee1dB38B8992e"}
+
+loans = {"0x123":[{"loanID":0, "balance": 100, "loanExpiry": 123}],"0x456":[{"loanID":1, "balance": 200, "loanExpiry": (time.time_ns() + 999999999999999)}],"0x789":[{"loanID":2, "balance": 0,"loanExpiry": (time.time_ns() + 9999999999999999)}],"0x60137a39d798FC9824fe17115090502A0a1677e6":[{"loanID":1, "balance": 200, "loanExpiry": (time.time_ns() + 999999999999999)}]}
+#{"accNo": 123, "balance": 100, "account holder": ikea, "transactionHistory": [{}]}
+def convertETHtoSGD(ETH):
+    response = cg.get_price(ids='ethereum', vs_currencies='sgd')
+    conversionETHtoSGD =  response['ethereum']['sgd']
+    return ETH * conversionETHtoSGD
+
+def convertSGDtoETH(SGD):
+    response = cg.get_price(ids='ethereum', vs_currencies='sgd')
+    conversionETHtoSGD =  response['ethereum']['sgd']
+    return (SGD / conversionETHtoSGD)
+
+class Exchange(Resource):
+    def post(self):
+        args = exchange_post_args.parse_args()
+        response = cg.get_price(ids='ethereum', vs_currencies='sgd')
+        transactionAmountETH = convertSGDtoETH(args['sgd'])
+        return {'ETH': transactionAmountETH}, 201
+    
+   
+
+class Collateral(Resource):
+
+    def post(self, walletAddress):
+        headers = {
+            "accept": "application/json",
+            "Authorization": NFTPORT_APIKEY
+        }
+        args = collateral_post_args.parse_args()
+        symbol = args['symbol'].lower()
+        if symbol not in approvedCollections:
+            return {"result": "failed"}, 402
+        collectionID = approvedCollections[symbol]
+        url = "https://api.nftport.xyz/v0/transactions/stats/" + collectionID + "?chain=ethereum"
+        response = requests.get(url, headers=headers)
+        response = response.json()
+        floorPriceETH = response['statistics']['floor_price']
+        floorPriceSGD = convertETHtoSGD(floorPriceETH) 
+        if floorPriceSGD >= args['transactionAmount'] * 2:
+            return {"result": "success"}, 201
+        else:
+            return {"result": "failed"}, 404
+
+    def get(self, walletAddress):
+        #walletAddress = "0xeeBDCb8B2558Ae6f10bAdb1609e4954Fd34DcD6e"
+        headers = {
+            "accept": "application/json", 
+            "Authorization": NFTPORT_APIKEY
+        }
+        # args = collateral_get_args.parse_args()
+        url = "https://api.nftport.xyz/v0/accounts/" + walletAddress + "?chain=goerli&page_size=50&include=metadata"
+        response = requests.get(url, headers=headers)
+        response = response.json()
+        nftList = []
+        for nft in response['nfts']:
+            nftList.append({"token_id": nft['token_id'], "contract_address": nft['contract_address']})
+            headers = {"accept": "application/json"}
+        for nft in nftList:
+            url = f"https://eth-goerli.g.alchemy.com/nft/v2/{ALCHEMY_APIKEY}/getNFTMetadata?contractAddress={nft['contract_address']}&tokenId={nft['token_id']}&refreshCache=false"
+            response = requests.get(url, headers=headers)       
+            response = response.json()
+            if response['contractMetadata']['symbol'].lower() not in approvedCollections:
+                continue
+            nft["file_url"] = response["media"][0]["raw"]
+            nft["name"] = response["title"]
+            nft["symbol"] = response['contractMetadata']['symbol'].lower()
+            collectionID = approvedCollections[nft["symbol"]]
+            url = "https://api.nftport.xyz/v0/transactions/stats/" + collectionID + "?chain=ethereum"
+            
+            response = requests.get(url, headers={
+            "accept": "application/json",
+            "Authorization": NFTPORT_APIKEY
+        })
+            response = response.json()
+            floorPriceETH = response['statistics']['floor_price']
+            floorPriceSGD = convertETHtoSGD(floorPriceETH)
+            nft["value"] = round(floorPriceSGD * 0.5)
+        return {'nfts':nftList},201
+
+def approveLoan(transactionAmount, merchantAccount):
+    if merchantAccount not in accounts:
+        raise ValueError("Invalid Merchant Account Number")
+    return transactionAmount <= accounts[PANDA_BANK_ACCOUNT_NUMBER]["Balance"]
+
+def createTransaction(transactionAmount, sender, receiver):
+    date = round(time.time())
+    accounts[receiver]["TransactionHistory"].insert(0,{"Sender": sender, "Transaction Amount(SGD)": transactionAmount, "Date": date, "recipient": receiver})
+    accounts[sender]["TransactionHistory"].insert(0,{"Sender": sender, "Transaction Amount(SGD)": (-transactionAmount), "Date": date, "recipient": receiver})
+
+def loanTransfer(transactionAmount, merchantAccount):
+    if merchantAccount not in accounts:
+        raise ValueError("Invalid Merchant Account Number")
+    accounts[PANDA_BANK_ACCOUNT_NUMBER]["Balance"] -= transactionAmount
+    accounts[merchantAccount]["Balance"] += transactionAmount
+    createTransaction(transactionAmount,PANDA_BANK_ACCOUNT_NUMBER, merchantAccount)
+
+
+class Loan(Resource):
+    
+    def post(self):
+        args = Loan_get_args.parse_args()
+        transactionAmount = args['transactionAmount']
+        merchantAccount = args['merchantAccount']
+        try:
+            loanApproved = approveLoan(transactionAmount, merchantAccount)
+            response = {"Approved": loanApproved}
+            if loanApproved:
+                return response,201
+            return response, 422
+        except:
+            return {"Message": "Invalid Account Number"},404
+
+    def put(self):
+        args = Loan_put_args.parse_args()
+        transactionAmount = args['transactionAmount']
+        merchantAccount = args['merchantAccount']
+        try:
+            if not approveLoan(transactionAmount, merchantAccount):
+                return {"Message": "Loan was not approved"},422
+            loanTransfer(transactionAmount,merchantAccount)
+            return {"Message": "Loan Amount has been transferred"}, 201
+        except:
+            return {"Message": "Invalid Account Number"},404
+def createLoanRecord(walletAddress, loanID, remainingBalance, loanExpiry):
+    loanRecord = {"loanID": loanID, "balance":remainingBalance, "loanExpiry": loanExpiry}
+    if walletAddress in loans:
+        for receipt in loans[walletAddress]:
+            if receipt['loanID'] == loanID:
+                return 
+        loans[walletAddress].append(loanRecord)
+    else:
+        loans[walletAddress] = [loanRecord]
+
+
+def modifyLoanRecord(loanID, remainingBalance):  
+    for loanRecords in loans.values():   
+        for loan in loanRecords:          
+            if loan["loanID"] == loanID:
+                loan["balance"] = remainingBalance
+                return
+
+def updateLoanRecords():
+    for wallet, loanRecords in loans.items():   
+        for i in range(len(loanRecords) -1, -1, -1):
+            if float(loanRecords[i]['balance']) <= 0 or loanRecords[i]["loanExpiry"] <= round(time.time()):
+                del loanRecords[i]
+            
+
+
+
+class LoanInfo(Resource):
+    def post(self):
+        result = {}
+        args = LoanInfo_post_args.parse_args()
+        walletAddress = args["walletAddress"]
+        if walletAddress not in loans.keys():
+            return {"loans": []},403
+        updateLoanRecords()
+        return {"loans": loans[walletAddress]},201
+        
+
+
+    def put(self):
+        args = LoanInfo_put_args.parse_args()
+        walletAddress = args["walletAddress"]
+        loanID = args["loanID"]
+        balance = args["balance"]
+        loanExpiry = args["loanExpiry"]
+        createLoanRecord(walletAddress,loanID,balance,loanExpiry)
+        return {}, 201
+
+    def patch(self):
+        args = LoanInfo_patch_args.parse_args()
+        loanID = args['loanID']
+        balance = args['balance']
+        modifyLoanRecord(loanID, balance)
+        return {},201
+
+class Account(Resource):
+    def get(self,accountNumber):
+        if accountNumber not in accounts:
+            return {"Message":"Invalid Account Number"},404
+        res = {"accountNumber": accountNumber}.update(accounts[accountNumber])
+
+        return accounts[accountNumber], 201
+
+
+
+def generateMerchantQR(merchantAccountNumber, transactionAmount, merchantName):
+    if merchantAccountNumber not in accounts:
+        raise ValueError("Invalid Merchant Account Number")
+
+    inputData = merchantAccountNumber + " " + transactionAmount
+    qr = qrcode.QRCode(
+        version=1,
+        box_size=10,
+        border=5)
+    qr.add_data(inputData)
+    qr.make(fit=True)
+    img = qr.make_image(fill='black', back_color='white')
+    merchantQR = merchantName + "QR.png"
+    img.save(merchantQR)
+
+
+class QR(Resource):
+    def get(self):
+        args = QrInformation_get_args.parse_args()
+
+    def put(self):
+        pass
+
+class HOME(Resource):
+    def get(self):
+        return "This is home page"
+
+
+
+
+api.add_resource(Collateral, "/collateral/<string:walletAddress>")
+api.add_resource(Exchange, "/exchange")
+api.add_resource(Loan, "/loan")
+api.add_resource(Account, "/account/<string:accountNumber>")
+api.add_resource(LoanInfo, "/loanInfo")
+#api.add_resource(QrInformation,"/transact")
+api.add_resource(HOME, "/")
+if __name__ == "__main__":
+    app.run(debug=True)
